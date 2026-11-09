@@ -1343,6 +1343,30 @@ impl Store {
         .await
     }
 
+    pub(super) async fn put_tool_image(
+        &self,
+        session_id: SessionId,
+        sha256: String,
+        bytes: Vec<u8>,
+    ) -> Result<(), SessionRuntimeError> {
+        let now = now_ms();
+        self.call(Priority::AwaitControl, move |connection| {
+            store_tool_image(connection, session_id, &sha256, &bytes, now)
+        })
+        .await
+    }
+
+    pub(super) async fn read_tool_image(
+        &self,
+        session_id: SessionId,
+        sha256: String,
+    ) -> Result<Option<Vec<u8>>, SessionRuntimeError> {
+        self.call(Priority::AwaitControl, move |connection| {
+            load_tool_image(connection, session_id, &sha256)
+        })
+        .await
+    }
+
     pub(super) async fn tool_approval_policy(
         &self,
         session_id: SessionId,

@@ -57,7 +57,8 @@ pub use shell_policy::{
 };
 pub(crate) use spill::{
     READ_TOOL_RESULT_BOUNDS, ReadToolResultArgs, SpillHandle, SpillRead, SpillReadFuture,
-    SpillReader, read_tool_result_spec, render_tool_result,
+    SpillReader, ToolImageFuture, attach_recent_tool_images, read_tool_result_spec,
+    render_tool_result,
 };
 pub use steering::MAX_PENDING_STEERING;
 pub(crate) use steering::{SteeringMessage, SteeringReceiver, SteeringSender, steering_channel};

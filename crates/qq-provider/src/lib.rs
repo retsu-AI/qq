@@ -31,7 +31,8 @@ pub use credentials::{SecretLiteral, SecretRef};
 pub use http::{AttemptPolicy, TurnRecoveryPolicy};
 pub use model::{
     ContentBlock, IncompleteReason, Message, ModelRequest, ProviderError, ProviderErrorKind,
-    ProviderEvent, ProviderUsage, RetryOwner, Role, ToolChoice, ToolSpec,
+    ProviderEvent, ProviderUsage, RetryOwner, Role, ToolChoice, ToolSpec, tool_image_marker,
+    tool_image_markers,
 };
 pub use qq_reasoning::{ReasoningEffort, ReasoningKind};
 pub use request_auth::{

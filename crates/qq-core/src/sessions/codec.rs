@@ -121,6 +121,9 @@ impl From<&ContentBlock> for PersistedContentBlock {
                 content: content.clone(),
                 is_error: *is_error,
             },
+            ContentBlock::Image { .. } => Self::Text {
+                text: String::new(),
+            },
         }
     }
 }

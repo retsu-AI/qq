@@ -156,6 +156,14 @@ fn observed(
             result: HostToolResult {
                 content: outcome.content,
                 is_error: outcome.is_error,
+                images: outcome
+                    .images
+                    .into_iter()
+                    .map(|image| qq_core::HostToolImage {
+                        sha256: image.sha256,
+                        bytes: image.bytes,
+                    })
+                    .collect(),
             },
             result_digest: outcome.result_digest,
         }),

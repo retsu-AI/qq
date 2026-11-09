@@ -288,6 +288,7 @@ impl<'a> ResponsesRequest<'a> {
             };
             for block in message.content() {
                 input.push(match block {
+                    ContentBlock::Image { .. } => continue,
                     ContentBlock::Text { text } => InputItem::Message {
                         role,
                         content: Text(text),

@@ -234,8 +234,8 @@ impl ExternalToolHost for EmbeddedToolHost {
                             "result exceeds the {MAX_EMBEDDED_RESULT_BYTES}-byte limit"
                         )))
                     }
-                    Ok(content) => Ok(HostToolResult { content, is_error: false }),
-                    Err(content) => Ok(HostToolResult { content, is_error: true }),
+                    Ok(content) => Ok(HostToolResult { content, is_error: false, images: Vec::new() }),
+                    Err(content) => Ok(HostToolResult { content, is_error: true, images: Vec::new() }),
                 },
                 () = cancelled.cancelled() => Err(HostCallError::Cancelled),
                 () = tokio::time::sleep_until(deadline) => Err(HostCallError::Timeout),

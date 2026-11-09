@@ -269,7 +269,9 @@ impl<'a> From<&'a ModelRequest> for ChatCompletionsRequest<'a> {
         if let Some(system) = request.system() {
             messages.push(ChatMessage {
                 role: ChatRole::System,
-                content: Some(OwnedOrBorrowedText(Cow::Borrowed(system))),
+                content: Some(ChatContent::Text(OwnedOrBorrowedText(Cow::Borrowed(
+                    system,
+                )))),
                 tool_calls: None,
                 tool_call_id: None,
             });
@@ -313,7 +315,9 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
     if let [ContentBlock::Text { text }] = message.content() {
         messages.push(ChatMessage {
             role,
-            content: Some(OwnedOrBorrowedText(Cow::Borrowed(text.as_str()))),
+            content: Some(ChatContent::Text(OwnedOrBorrowedText(Cow::Borrowed(
+                text.as_str(),
+            )))),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -323,6 +327,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
     let mut text = String::new();
     let mut tool_calls = Vec::new();
     let mut wrote_results = false;
+    let mut images = Vec::new();
     for block in message.content() {
         match block {
             ContentBlock::Text { text: fragment } => text.push_str(fragment),
@@ -345,11 +350,18 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
                 wrote_results = true;
                 messages.push(ChatMessage {
                     role: ChatRole::Tool,
-                    content: Some(OwnedOrBorrowedText(Cow::Borrowed(content.as_str()))),
+                    content: Some(ChatContent::Text(OwnedOrBorrowedText(Cow::Borrowed(
+                        content.as_str(),
+                    )))),
                     tool_calls: None,
                     tool_call_id: Some(call_id),
                 });
             }
+            ContentBlock::Image { media_type, data } => images.push(ChatPart::ImageUrl {
+                image_url: ChatImageUrl {
+                    url: format!("data:{media_type};base64,{data}"),
+                },
+            }),
         }
     }
 
@@ -357,7 +369,7 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
         let content = if text.is_empty() && !tool_calls.is_empty() {
             None
         } else {
-            Some(OwnedOrBorrowedText(Cow::Owned(text)))
+            Some(ChatContent::Text(OwnedOrBorrowedText(Cow::Owned(text))))
         };
         messages.push(ChatMessage {
             role,
@@ -366,6 +378,33 @@ fn append_chat_messages<'a>(message: &'a Message, messages: &mut Vec<ChatMessage
             tool_call_id: None,
         });
     }
+    if !images.is_empty() {
+        // Tool messages are text only, so pixels follow them as a user message.
+        messages.push(ChatMessage {
+            role: ChatRole::User,
+            content: Some(ChatContent::Parts(images)),
+            tool_calls: None,
+            tool_call_id: None,
+        });
+    }
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ChatContent<'a> {
+    Text(OwnedOrBorrowedText<'a>),
+    Parts(Vec<ChatPart>),
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum ChatPart {
+    ImageUrl { image_url: ChatImageUrl },
+}
+
+#[derive(Serialize)]
+struct ChatImageUrl {
+    url: String,
 }
 
 #[derive(Serialize)]
@@ -377,7 +416,7 @@ struct ChatStreamOptions {
 struct ChatMessage<'a> {
     role: ChatRole,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<OwnedOrBorrowedText<'a>>,
+    content: Option<ChatContent<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatToolCall<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1069,6 +1108,35 @@ mod tests {
                 "stream_options": {"include_usage": true},
                 "max_tokens": 321
             })
+        );
+    }
+
+    #[test]
+    fn tool_images_follow_the_tool_messages_as_a_user_message() {
+        let request = ModelRequest::new(
+            "chat-test",
+            vec![Message::tool_results(vec![
+                ContentBlock::ToolResult {
+                    call_id: "call_1".to_owned(),
+                    content: "shot".to_owned(),
+                    is_error: false,
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_owned(),
+                    data: "QUJD".into(),
+                },
+            ])],
+            64,
+        );
+        let body = serde_json::to_value(ChatCompletionsRequest::from(&request)).unwrap();
+        assert_eq!(
+            body["messages"],
+            json!([
+                {"role": "tool", "tool_call_id": "call_1", "content": "shot"},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}
+                ]}
+            ])
         );
     }
 

@@ -303,7 +303,9 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                 .flat_map(Message::content)
                 .filter_map(|block| match block {
                     ContentBlock::ToolCall { id, name, .. } => Some((id.as_str(), name.as_str())),
-                    ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
+                    ContentBlock::Text { .. }
+                    | ContentBlock::ToolResult { .. }
+                    | ContentBlock::Image { .. } => None,
                 })
                 .fold(HashMap::new(), |mut names, (id, name)| {
                     names.entry(id).or_insert(name);
@@ -320,6 +322,9 @@ impl TryFrom<&ModelRequest> for ConverseRequest {
                     Role::Assistant => ConversationRole::Assistant,
                 });
                 for block in message.content() {
+                    if matches!(block, ContentBlock::Image { .. }) {
+                        continue;
+                    }
                     builder = builder.content(match &tool_names {
                         Some(names) => BedrockContentBlock::Text(tool_block_as_text(block, names)),
                         None => bedrock_content_block(block)?,
@@ -400,6 +405,7 @@ fn tool_block_as_text(block: &ContentBlock, names: &HashMap<&str, &str>) -> Stri
                 .copied()
                 .unwrap_or("an earlier call"),
         ),
+        ContentBlock::Image { .. } => String::new(),
     }
 }
 
@@ -441,6 +447,9 @@ fn bedrock_content_block(block: &ContentBlock) -> Result<BedrockContentBlock, Pr
                     )
                 })
         }
+        ContentBlock::Image { .. } => Err(ProviderError::Configuration(
+            "Amazon Bedrock requests do not carry tool images".to_owned(),
+        )),
     }
 }
 

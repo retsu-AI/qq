@@ -173,6 +173,9 @@ impl ModelRequest {
                             ContentBlock::ToolResult {
                                 call_id, content, ..
                             } => call_id.len() + content.len(),
+                            ContentBlock::Image { media_type, data } => {
+                                media_type.len() + data.len()
+                            }
                         }
                 },
             )
@@ -399,7 +402,9 @@ impl Message {
     pub fn has_content(&self) -> bool {
         self.content.iter().any(|block| match block {
             ContentBlock::Text { text } => !text.trim().is_empty(),
-            ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => true,
+            ContentBlock::ToolCall { .. }
+            | ContentBlock::ToolResult { .. }
+            | ContentBlock::Image { .. } => true,
         })
     }
 }
@@ -419,6 +424,41 @@ pub enum ContentBlock {
         content: String,
         is_error: bool,
     },
+    /// Base64 image pixels. Added only while a request is built, never stored
+    /// in history. Adapters without image support skip it, so the model still
+    /// sees the tool result's text marker.
+    Image {
+        media_type: String,
+        data: Arc<str>,
+    },
+}
+
+const TOOL_IMAGE_MARKER_PREFIX: &str = "[image content omitted; ";
+
+/// The text a tool result carries in place of an image it returned.
+#[must_use]
+pub fn tool_image_marker(media_type: &str, sha256: &str) -> String {
+    format!("{TOOL_IMAGE_MARKER_PREFIX}{media_type} sha256:{sha256}]")
+}
+
+/// Every well-formed image marker in `text`, as `(media_type, sha256)`, in order.
+#[must_use]
+pub fn tool_image_markers(text: &str) -> Vec<(&str, &str)> {
+    text.match_indices(TOOL_IMAGE_MARKER_PREFIX)
+        .filter_map(|(start, _)| {
+            let rest = &text[start + TOOL_IMAGE_MARKER_PREFIX.len()..];
+            let (media_type, rest) = rest.split_once(" sha256:")?;
+            let sha256 = rest.get(..64)?;
+            let valid = matches!(
+                media_type,
+                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+            ) && sha256
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                && rest[64..].starts_with(']');
+            valid.then_some((media_type, sha256))
+        })
+        .collect()
 }
 
 impl PartialEq for ContentBlock {
@@ -449,7 +489,20 @@ impl PartialEq for ContentBlock {
                     is_error: other_is_error,
                 },
             ) => call_id == other_call_id && content == other_content && is_error == other_is_error,
-            (Self::Text { .. } | Self::ToolCall { .. } | Self::ToolResult { .. }, _) => false,
+            (
+                Self::Image { media_type, data },
+                Self::Image {
+                    media_type: other_media_type,
+                    data: other_data,
+                },
+            ) => media_type == other_media_type && data == other_data,
+            (
+                Self::Text { .. }
+                | Self::ToolCall { .. }
+                | Self::ToolResult { .. }
+                | Self::Image { .. },
+                _,
+            ) => false,
         }
     }
 }
@@ -725,5 +778,39 @@ mod tests {
             Some(ProviderError::Configuration(message))
                 if message.contains("unsupported by Anthropic Messages")
         ));
+    }
+}
+
+#[cfg(test)]
+mod tool_image_marker_tests {
+    use super::*;
+
+    #[test]
+    fn markers_round_trip_and_reject_malformed_text() {
+        let digest = "a".repeat(64);
+        let marker = tool_image_marker("image/png", &digest);
+        let text = format!("x {marker} y {marker}");
+        assert_eq!(
+            tool_image_markers(&text),
+            [
+                ("image/png", digest.as_str()),
+                ("image/png", digest.as_str())
+            ]
+        );
+        for bad in [
+            "[image content omitted]".to_owned(),
+            format!("[image content omitted; text/html sha256:{digest}]"),
+            format!(
+                "[image content omitted; image/png sha256:{}]",
+                "A".repeat(64)
+            ),
+            format!(
+                "[image content omitted; image/png sha256:{}",
+                "a".repeat(64)
+            ),
+            "[image content omitted; image/png sha256:abc]".to_owned(),
+        ] {
+            assert!(tool_image_markers(&bad).is_empty(), "{bad}");
+        }
     }
 }

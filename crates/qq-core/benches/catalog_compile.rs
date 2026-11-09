@@ -88,6 +88,7 @@ impl ExternalToolHost for FixedHost {
         Box::pin(std::future::ready(Ok(HostToolResult {
             content: String::new(),
             is_error: false,
+            images: Vec::new(),
         })))
     }
 

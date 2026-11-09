@@ -6,6 +6,58 @@ struct StoredAttachment {
     content: Option<String>,
 }
 
+const MAX_SESSION_TOOL_IMAGES: u64 = 20;
+
+/// Keep a tool's image by digest, retaining only the session's newest images.
+/// They share the attachment blob table but not its byte budget.
+pub(super) fn store_tool_image(
+    connection: &Connection,
+    session_id: SessionId,
+    sha256: &str,
+    bytes: &[u8],
+    now: u64,
+) -> Result<(), SessionRuntimeError> {
+    let session = session_id.to_string();
+    connection.execute(
+        "INSERT INTO attachment_blobs(session_id, blob_key, content, content_bytes, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(session_id, blob_key)
+         DO UPDATE SET content = excluded.content, created_at_ms = excluded.created_at_ms,
+                       evicted_at_ms = NULL",
+        params![
+            session,
+            format!("tool-image:{sha256}"),
+            bytes,
+            bytes.len() as u64,
+            now
+        ],
+    )?;
+    connection.execute(
+        "DELETE FROM attachment_blobs
+         WHERE session_id = ?1 AND blob_key LIKE 'tool-image:%' AND blob_key NOT IN (
+             SELECT blob_key FROM attachment_blobs
+             WHERE session_id = ?1 AND blob_key LIKE 'tool-image:%'
+             ORDER BY created_at_ms DESC, blob_key DESC LIMIT ?2)",
+        params![session, MAX_SESSION_TOOL_IMAGES],
+    )?;
+    Ok(())
+}
+
+pub(super) fn load_tool_image(
+    connection: &Connection,
+    session_id: SessionId,
+    sha256: &str,
+) -> Result<Option<Vec<u8>>, SessionRuntimeError> {
+    Ok(connection
+        .query_row(
+            "SELECT content FROM attachment_blobs WHERE session_id = ?1 AND blob_key = ?2",
+            params![session_id.to_string(), format!("tool-image:{sha256}")],
+            |row| row.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 pub(super) fn store_message_attachments(
     transaction: &Connection,
     session_id: SessionId,
@@ -54,7 +106,7 @@ pub(super) fn store_message_attachments(
     }
     let held: u64 = transaction.query_row(
         "SELECT COALESCE(SUM(content_bytes), 0) FROM attachment_blobs
-         WHERE session_id = ?1 AND content IS NOT NULL",
+         WHERE session_id = ?1 AND content IS NOT NULL AND blob_key NOT LIKE 'tool-image:%'",
         [&session],
         |row| row.get(0),
     )?;
@@ -63,6 +115,7 @@ pub(super) fn store_message_attachments(
         let mut statement = transaction.prepare(
             "SELECT b.blob_key, b.content_bytes FROM attachment_blobs b
              WHERE b.session_id = ?1 AND b.content IS NOT NULL
+               AND b.blob_key NOT LIKE 'tool-image:%'
                AND NOT EXISTS (
                    SELECT 1 FROM message_attachments a
                    JOIN messages m ON m.id = a.message_id
@@ -1139,6 +1192,7 @@ pub(super) fn context_bytes(messages: &[Message]) -> usize {
             ContentBlock::ToolResult {
                 call_id, content, ..
             } => call_id.len() + content.len(),
+            ContentBlock::Image { .. } => 0,
         })
         .fold(
             messages
@@ -1458,7 +1512,9 @@ pub(super) fn append_run_turns(
                         }
                     }))
                 }
-                ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
+                ContentBlock::Text { .. }
+                | ContentBlock::ToolResult { .. }
+                | ContentBlock::Image { .. } => None,
             })
             .collect::<Result<Vec<_>, SessionRuntimeError>>()?;
         let mut message = Message::new(Role::Assistant, content);
@@ -1487,6 +1543,51 @@ pub(super) fn append_run_turns(
         context.push(Message::user(text));
     }
     Ok(ends)
+}
+
+#[cfg(test)]
+mod tool_image_tests {
+    use super::*;
+
+    const TABLE: &str = "CREATE TABLE attachment_blobs (
+        session_id TEXT NOT NULL, blob_key TEXT NOT NULL, content BLOB,
+        content_bytes INTEGER NOT NULL, created_at_ms INTEGER NOT NULL,
+        evicted_at_ms INTEGER, PRIMARY KEY (session_id, blob_key));";
+
+    #[test]
+    fn images_survive_reopening_and_only_the_newest_are_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.db");
+        let session = SessionId::from_bytes([7; 16]);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(TABLE).unwrap();
+        for index in 0..=MAX_SESSION_TOOL_IMAGES {
+            store_tool_image(
+                &connection,
+                session,
+                &format!("digest-{index:02}"),
+                &[index as u8],
+                index,
+            )
+            .unwrap();
+        }
+        drop(connection);
+
+        let reopened = Connection::open(&path).unwrap();
+        assert_eq!(
+            load_tool_image(&reopened, session, "digest-00").unwrap(),
+            None
+        );
+        assert_eq!(
+            load_tool_image(&reopened, session, "digest-20").unwrap(),
+            Some(vec![20])
+        );
+        assert_eq!(
+            load_tool_image(&reopened, SessionId::from_bytes([8; 16]), "digest-20").unwrap(),
+            None,
+            "images are scoped to their session"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -365,6 +365,7 @@ impl ExternalToolHost for StepHost {
             Ok(HostToolResult {
                 content: content[..result_bytes].to_owned(),
                 is_error: false,
+                images: Vec::new(),
             })
         })
     }

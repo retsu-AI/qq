@@ -43,7 +43,7 @@ use crate::{
     runtime::{
         HISTORY_SCAN_BUDGET_BYTES, HISTORY_SCAN_STEPS, HistoryCursor, HistoryMatch, HistorySearch,
         HistorySearchFuture, HistorySearcher, SpillHandle, SpillReadFuture, SpillReader,
-        excerpt_around,
+        ToolImageFuture, excerpt_around,
     },
     workspace::{FileState, FileStateUpdate},
 };

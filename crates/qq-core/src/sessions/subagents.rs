@@ -955,6 +955,30 @@ impl SpillReader for SessionEvidenceReader {
                 .map_err(|error| format!("spill read failed: {error}"))
         })
     }
+
+    fn put_tool_image(&self, sha256: String, bytes: Vec<u8>) -> ToolImageFuture<()> {
+        let inner = Arc::clone(&self.inner);
+        let session_id = self.session_id;
+        Box::pin(async move {
+            inner
+                .store
+                .put_tool_image(session_id, sha256, bytes)
+                .await
+                .map_err(|error| format!("tool image store failed: {error}"))
+        })
+    }
+
+    fn read_tool_image(&self, sha256: String) -> ToolImageFuture<Option<Vec<u8>>> {
+        let inner = Arc::clone(&self.inner);
+        let session_id = self.session_id;
+        Box::pin(async move {
+            inner
+                .store
+                .read_tool_image(session_id, sha256)
+                .await
+                .map_err(|error| format!("tool image read failed: {error}"))
+        })
+    }
 }
 
 pub(super) struct SessionAuditHook {

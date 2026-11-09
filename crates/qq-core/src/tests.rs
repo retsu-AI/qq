@@ -869,6 +869,7 @@ impl ExternalToolHost for WideHost {
                 None => Ok(HostToolResult {
                     content: format!("{name} ran"),
                     is_error: false,
+                    images: Vec::new(),
                 }),
             }
         })

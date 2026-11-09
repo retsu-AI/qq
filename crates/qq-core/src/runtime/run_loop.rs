@@ -678,7 +678,7 @@ impl plan::CompiledAgentPlan {
                                    .iter()
                                    .filter_map(|block| match block {
                                        ContentBlock::Text { text } => Some(text.as_str()),
-                                       ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => None,
+                                       ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } | ContentBlock::Image { .. } => None,
                                    })
                                    .collect::<Vec<_>>()
                                    .join("\n")
@@ -1331,7 +1331,7 @@ impl RunState {
     ) -> impl futures_util::Stream<Item = TurnStep<StreamedTurn>> + Send + '_ {
         stream! {
                     let Self { env, messages, steering, run, window, slice, recovery, .. } = self;
-                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, cache_key, .. } = env;
+                    let RunEnvironment { plan, compactor, summarizer, reducible_messages, cache_key, spills, .. } = env;
                     let reducible_messages = *reducible_messages;
                     let provider = &plan.runtime.provider;
                     let model = &plan.runtime.model;
@@ -1359,9 +1359,15 @@ impl RunState {
                                 compatible_input_tokens,
                             },
                         });
+                        let request_messages = match spills {
+                            Some(store) => {
+                                runtime::attach_recent_tool_images(messages, store.as_ref()).await
+                            }
+                            None => Arc::clone(messages),
+                        };
                         let request = ModelRequest::new(
                             Arc::clone(model),
-                            Arc::clone(messages),
+                            request_messages,
                             request_cap,
                         )
                         .with_retry_owner(if recovery.turn_retries == 0 {
@@ -2919,7 +2925,12 @@ impl RunState {
                                             hosts::HostCallObservation::Observed(future) => future.await.map(|observed| (observed.result, observed.result_digest)),
                                         };
                                         match outcome {
-                                            Ok((outcome, identity)) => {
+                                            Ok((mut outcome, identity)) => {
+                                                if let Some(store) = &spills {
+                                                    for image in std::mem::take(&mut outcome.images) {
+                                                        let _ = store.put_tool_image(image.sha256, image.bytes).await;
+                                                    }
+                                                }
                                                 let mut result = tools::bounded_result(outcome.content, outcome.is_error);
                                                 if let Some(identity) = identity { result.result_digest = identity; }
                                                 result
