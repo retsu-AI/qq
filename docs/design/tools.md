@@ -875,8 +875,9 @@ lines.
 perms= binary=[ mime=]`, one line, for any file including binaries (which
 `lines` and `outline` refuse with `not_text`). Images (`png jpg gif webp`)
 answer `info` plus `hint=image_unsupported_by_model` from every mode
-(`hint=image_too_large` above 5 MiB); no tool passes image content to a
-model.
+(`hint=image_too_large` above 5 MiB); `read_file` does not pass image
+content to a model. Images returned by MCP tools do reach the model, on the
+chat-completions and Anthropic routes (newest 20 images, 5 MiB per request).
 
 Failures are typed: `invalid_ranges`, `invalid_offset`, `invalid_limit`,
 `invalid_if_changed_since`, `range_out_of_bounds` (with `last_line=`),
