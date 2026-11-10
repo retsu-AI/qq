@@ -2922,6 +2922,7 @@ dependencies = [
 name = "qq-mcp"
 version = "0.1.11"
 dependencies = [
+ "base64 0.22.1",
  "futures-util",
  "qq-provider",
  "reqwest",

@@ -209,6 +209,7 @@ fn message_bytes(message: &Message) -> usize {
             ContentBlock::ToolResult {
                 call_id, content, ..
             } => call_id.len() + content.len(),
+            ContentBlock::Image { data, .. } => data.len(),
         })
         .sum()
 }

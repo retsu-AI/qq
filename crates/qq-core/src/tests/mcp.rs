@@ -43,6 +43,7 @@ async fn merges_mcp_declarations_and_dispatches_granted_calls_to_the_registry() 
     let mut registry = MockMcpRegistry::returning(HostToolResult {
         content: "pong".to_owned(),
         is_error: false,
+        images: Vec::new(),
     });
     registry.specs.push(qq_provider::ToolSpec::new(
         "rogue_tool",
@@ -117,6 +118,7 @@ async fn mcp_failures_are_tool_errors_and_results_are_truncated() {
     let registry = MockMcpRegistry::returning(HostToolResult {
         content: "the server exploded".to_owned(),
         is_error: true,
+        images: Vec::new(),
     });
     let runtime = Runtime::new(
         McpCallProvider {
@@ -151,6 +153,7 @@ async fn mcp_failures_are_tool_errors_and_results_are_truncated() {
     let registry = MockMcpRegistry::returning(HostToolResult {
         content: oversized,
         is_error: false,
+        images: Vec::new(),
     });
     let runtime = Runtime::new(
         McpCallProvider {
@@ -188,6 +191,7 @@ async fn ungranted_mcp_calls_are_denied_unattended_and_unknown_names_error() {
     let registry = MockMcpRegistry::returning(HostToolResult {
         content: "pong".to_owned(),
         is_error: false,
+        images: Vec::new(),
     });
     let runtime = Runtime::new(
         McpCallProvider {
@@ -246,5 +250,81 @@ async fn ungranted_mcp_calls_are_denied_unattended_and_unknown_names_error() {
     assert!(matches!(
         events.last(),
         Some(RuntimeEvent::Completed { .. })
+    ));
+}
+
+#[derive(Default)]
+struct RecordingImages(Mutex<std::collections::HashMap<String, Vec<u8>>>);
+
+impl runtime::SpillReader for RecordingImages {
+    fn read(&self, _: runtime::SpillHandle) -> runtime::SpillReadFuture {
+        Box::pin(std::future::ready(Ok(runtime::SpillRead::Missing)))
+    }
+
+    fn put_tool_image(&self, sha256: String, bytes: Vec<u8>) -> runtime::ToolImageFuture<()> {
+        self.0.lock().unwrap().insert(sha256, bytes);
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn read_tool_image(&self, sha256: String) -> runtime::ToolImageFuture<Option<Vec<u8>>> {
+        let found = self.0.lock().unwrap().get(&sha256).cloned();
+        Box::pin(std::future::ready(Ok(found)))
+    }
+}
+
+#[tokio::test]
+async fn a_host_image_reaches_the_next_model_request_but_not_history() {
+    struct AllowAllGate;
+
+    impl ToolGate for AllowAllGate {
+        fn resolve(&self, _call: &RuntimeToolCall) -> ToolGateFuture {
+            Box::pin(std::future::ready(GateDecision::Execute))
+        }
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let sha256 = "b".repeat(64);
+    let marker = qq_provider::tool_image_marker("image/png", &sha256);
+    let mut registry = MockMcpRegistry::returning(HostToolResult {
+        content: marker.clone(),
+        is_error: false,
+        images: vec![HostToolImage {
+            sha256,
+            bytes: b"ABC".to_vec(),
+        }],
+    });
+    registry.grants = vec!["mcp__srv__ping".to_owned()];
+    let runtime = Runtime::new(
+        McpCallProvider {
+            requests: Arc::clone(&requests),
+        },
+        "gpt-test",
+        256,
+    )
+    .unwrap()
+    .with_tool_host(Arc::new(registry));
+    let events = runtime
+        .run_loop_with_spawner(
+            vec![Message::user("ping")],
+            directory.path().to_owned(),
+            RunCancellation::new(),
+            Arc::new(AllowAllGate),
+            Arc::default(),
+            RunCapabilities::user(None).with_spills(Arc::new(RecordingImages::default())),
+        )
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::ToolCallFinished { result, .. } if *result == marker
+    )));
+    let requests = requests.lock().unwrap();
+    assert!(matches!(
+        requests[1].messages()[2].content(),
+        [
+            ContentBlock::ToolResult { content, .. },
+            ContentBlock::Image { media_type, data },
+        ] if *content == marker && media_type == "image/png" && &**data == "QUJD"
     ));
 }

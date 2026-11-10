@@ -283,6 +283,7 @@ impl<'a> GenerateContentRequest<'a> {
             let mut parts = Vec::with_capacity(message.content().len());
             for block in message.content() {
                 parts.push(match block {
+                    ContentBlock::Image { .. } => continue,
                     ContentBlock::Text { text } => GooglePart::Text { text: Text(text) },
                     ContentBlock::ToolCall {
                         name, arguments, ..

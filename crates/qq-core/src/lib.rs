@@ -64,8 +64,8 @@ pub use context_source::{
 pub use hosts::{
     EMBEDDED_TOOL_PREFIX, EmbeddedHostError, EmbeddedToolFuture, EmbeddedToolHandler,
     EmbeddedToolHost, EmbeddedToolHostBuilder, ExternalToolHost, HostCallError, HostCallFuture,
-    HostCallObservation, HostCatalog, HostReadiness, HostShutdownFuture, HostTool, HostToolResult,
-    MCP_TOOL_PREFIX, ObservedHostCallFuture, ObservedHostToolResult, ToolHints,
+    HostCallObservation, HostCatalog, HostReadiness, HostShutdownFuture, HostTool, HostToolImage,
+    HostToolResult, MCP_TOOL_PREFIX, ObservedHostCallFuture, ObservedHostToolResult, ToolHints,
 };
 pub use runtime::{
     AUDIT_TOOL_CALL_THRESHOLD, ApprovedReadImage, ApprovedReadImages, AuditMode, AuditPolicy,
@@ -549,7 +549,8 @@ fn recover_pins(
                 }
                 ContentBlock::Text { .. }
                 | ContentBlock::ToolCall { .. }
-                | ContentBlock::ToolResult { .. } => {}
+                | ContentBlock::ToolResult { .. }
+                | ContentBlock::Image { .. } => {}
             }
         }
     }
@@ -1701,6 +1702,7 @@ pub(crate) fn measure_message(message: &Message) -> u64 {
                 } => u64::try_from(call_id.len())
                     .unwrap_or(u64::MAX)
                     .saturating_add(u64::try_from(content.len()).unwrap_or(u64::MAX)),
+                ContentBlock::Image { .. } => 0,
             };
             total
                 .saturating_add(CONTEXT_BLOCK_FRAMING_BYTES)

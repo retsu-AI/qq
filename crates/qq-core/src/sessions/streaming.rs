@@ -208,7 +208,9 @@ pub(super) fn persist_model_turn(
                 ContentBlock::Text { text } => {
                     total.saturating_add(u64::try_from(text.len()).unwrap_or(u64::MAX))
                 }
-                ContentBlock::ToolCall { .. } | ContentBlock::ToolResult { .. } => total,
+                ContentBlock::ToolCall { .. }
+                | ContentBlock::ToolResult { .. }
+                | ContentBlock::Image { .. } => total,
             })
     } else {
         0

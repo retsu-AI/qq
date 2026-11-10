@@ -122,6 +122,7 @@ impl ExternalToolHost for DriftingHost {
         hosts::HostCallObservation::Rendered(Box::pin(std::future::ready(Ok(HostToolResult {
             content: "deployed".to_owned(),
             is_error: false,
+            images: Vec::new(),
         }))))
     }
 

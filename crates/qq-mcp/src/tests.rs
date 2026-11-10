@@ -1316,3 +1316,48 @@ fn observed_identity_excludes_outer_transport_metadata() {
     assert!(first.result_digest.is_some());
     assert_eq!(first.result_digest, second.result_digest);
 }
+
+const ONE_PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg==";
+
+#[test]
+fn image_results_carry_a_marker_and_validated_bytes() {
+    let outcome = render_result(CallToolResult::success(vec![
+        ContentBlock::text("before"),
+        ContentBlock::image(ONE_PIXEL_PNG, "image/jpeg"),
+    ]));
+    assert_eq!(outcome.images.len(), 1);
+    let image = &outcome.images[0];
+    assert_eq!(image.media_type, "image/png", "the bytes decide the type");
+    assert_eq!(
+        outcome.content,
+        format!(
+            "before\n{}",
+            qq_provider::tool_image_marker("image/png", &image.sha256)
+        )
+    );
+    assert_eq!(
+        qq_provider::tool_image_markers(&outcome.content),
+        [("image/png", image.sha256.as_str())]
+    );
+    assert!(outcome.result_digest.is_some());
+}
+
+#[test]
+fn unusable_images_keep_the_omitted_text() {
+    use base64::Engine as _;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let mut too_large = vec![0_u8; MAX_MCP_IMAGE_BYTES + 1];
+    too_large[..8].copy_from_slice(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+    for data in [
+        "not base64!".to_owned(),
+        encode(b"plain text, not an image"),
+        encode(&too_large),
+    ] {
+        let outcome = render_result(CallToolResult::success(vec![ContentBlock::image(
+            data,
+            "image/png",
+        )]));
+        assert!(outcome.images.is_empty());
+        assert_eq!(outcome.content, "[image content omitted]");
+    }
+}

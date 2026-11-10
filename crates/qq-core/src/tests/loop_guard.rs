@@ -859,6 +859,7 @@ async fn runtime_external_producer_identity_survives_equal_previews() {
     let registry = MockMcpRegistry::returning(HostToolResult {
         content: "[image content omitted]".to_owned(),
         is_error: false,
+        images: Vec::new(),
     });
     let calls = Arc::clone(&registry.calls);
     let runtime = Runtime::new(
@@ -903,6 +904,7 @@ async fn runtime_1500_changed_results_for_one_call_remain_novel() {
     let registry = MockMcpRegistry::returning(HostToolResult {
         content: "[image content omitted]".to_owned(),
         is_error: false,
+        images: Vec::new(),
     });
     let calls = Arc::clone(&registry.calls);
     let requests = Arc::new(Mutex::new(Vec::new()));

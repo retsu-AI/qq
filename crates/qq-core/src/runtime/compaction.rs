@@ -50,6 +50,7 @@ impl SummaryFold {
                             "[Tool result {call_id}; error={is_error}] {content}"
                         ));
                     }
+                    ContentBlock::Image { .. } => {}
                 }
                 text.push('\n');
             }

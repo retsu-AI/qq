@@ -185,8 +185,66 @@ pub enum McpBearer {
 pub struct McpCallOutcome {
     pub result_digest: Option<[u8; 32]>,
     pub content: String,
+    pub images: Vec<McpImage>,
     pub is_error: bool,
     pub failure: Option<McpCallFailure>,
+}
+
+/// A validated image returned by a tool; its text marker is in `content`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpImage {
+    pub media_type: &'static str,
+    pub sha256: String,
+    pub bytes: Vec<u8>,
+}
+
+const MAX_MCP_IMAGE_BYTES: usize = 3_750_000;
+
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    match bytes {
+        [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, ..] => Some("image/png"),
+        [0xff, 0xd8, 0xff, ..] => Some("image/jpeg"),
+        [b'G', b'I', b'F', b'8', b'7' | b'9', b'a', ..] => Some("image/gif"),
+        [
+            b'R',
+            b'I',
+            b'F',
+            b'F',
+            _,
+            _,
+            _,
+            _,
+            b'W',
+            b'E',
+            b'B',
+            b'P',
+            ..,
+        ] => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn decode_image(data: &str) -> Option<McpImage> {
+    use base64::Engine as _;
+    if data.len() / 4 * 3 > MAX_MCP_IMAGE_BYTES + 3 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .ok()?;
+    if bytes.len() > MAX_MCP_IMAGE_BYTES {
+        return None;
+    }
+    let media_type = sniff_image(&bytes)?;
+    let sha256 = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Some(McpImage {
+        media_type,
+        sha256,
+        bytes,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +265,7 @@ impl McpCallOutcome {
     fn error(content: impl Into<String>, failure: McpCallFailure) -> Self {
         Self {
             content: content.into(),
+            images: Vec::new(),
             is_error: true,
             failure: Some(failure),
             result_digest: None,
@@ -915,6 +974,7 @@ impl ServerHandle {
             Err(ServiceError::McpError(error)) => McpCallOutcome {
                 result_digest: None,
                 content: format!("MCP server returned an error: {error}"),
+                images: Vec::new(),
                 is_error: true,
                 failure: None,
             },
@@ -979,10 +1039,19 @@ fn render_result(result: CallToolResult) -> McpCallOutcome {
     let result_digest = Some(identity.0.finalize().into());
 
     let mut content = String::new();
+    let mut images = Vec::new();
     for block in &result.content {
         let rendered = match block {
             ContentBlock::Text(text) => text.text.clone(),
-            ContentBlock::Image(_) => "[image content omitted]".to_owned(),
+            ContentBlock::Image(image) => match decode_image(&image.data) {
+                Some(decoded) => {
+                    let marker =
+                        qq_provider::tool_image_marker(decoded.media_type, &decoded.sha256);
+                    images.push(decoded);
+                    marker
+                }
+                None => "[image content omitted]".to_owned(),
+            },
             ContentBlock::Audio(_) => "[audio content omitted]".to_owned(),
             ContentBlock::Resource(resource) => {
                 serde_json::to_string(resource).unwrap_or_else(|_| "[resource]".to_owned())
@@ -1004,6 +1073,7 @@ fn render_result(result: CallToolResult) -> McpCallOutcome {
     }
     McpCallOutcome {
         content,
+        images,
         is_error: result.is_error.unwrap_or(false),
         failure: None,
         result_digest,

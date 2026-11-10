@@ -77,6 +77,14 @@ pub enum HostCallError {
 pub struct HostToolResult {
     pub content: String,
     pub is_error: bool,
+    pub images: Vec<HostToolImage>,
+}
+
+/// An image a host returned; the matching marker is already in `content`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostToolImage {
+    pub sha256: String,
+    pub bytes: Vec<u8>,
 }
 
 pub type HostCallFuture =

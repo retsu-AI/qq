@@ -27,7 +27,7 @@ fn side_capture_is_bounded_and_preserves_complete_tool_units() {
             ContentBlock::ToolResult { call_id, .. } => {
                 results.insert(call_id.clone());
             }
-            ContentBlock::Text { .. } => {}
+            ContentBlock::Text { .. } | ContentBlock::Image { .. } => {}
         }
     }
     assert!(!calls.is_empty());

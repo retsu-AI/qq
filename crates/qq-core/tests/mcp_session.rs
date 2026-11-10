@@ -57,6 +57,7 @@ impl ExternalToolHost for PingRegistry {
             Ok(HostToolResult {
                 content: "pong".to_owned(),
                 is_error: false,
+                images: Vec::new(),
             })
         })
     }

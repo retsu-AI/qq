@@ -58,6 +58,7 @@ impl ExternalToolHost for CountingHost {
             Ok(HostToolResult {
                 content: format!("appended record {count}"),
                 is_error: false,
+                images: Vec::new(),
             })
         })
     }

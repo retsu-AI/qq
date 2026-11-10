@@ -1278,7 +1278,9 @@ mod reference_assembly {
                             }
                         }
                     }),
-                    ContentBlock::Text { .. } | ContentBlock::ToolResult { .. } => None,
+                    ContentBlock::Text { .. }
+                    | ContentBlock::ToolResult { .. }
+                    | ContentBlock::Image { .. } => None,
                 })
                 .collect::<Vec<_>>();
             let message = Message::new(Role::Assistant, content);
@@ -1467,7 +1469,7 @@ fn assert_tool_results_are_exact(messages: &[Message]) {
                         .or_default()
                         .push(message_index);
                 }
-                ContentBlock::Text { .. } => {}
+                ContentBlock::Text { .. } | ContentBlock::Image { .. } => {}
             }
         }
     }

@@ -749,6 +749,17 @@ enum AnthropicBlock<'a> {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    Image {
+        source: AnthropicImageSource<'a>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum AnthropicImageSource<'a> {
+    Base64 { media_type: &'a str, data: &'a str },
 }
 
 impl AnthropicBlock<'_> {
@@ -756,7 +767,8 @@ impl AnthropicBlock<'_> {
         match self {
             Self::Text { cache_control, .. }
             | Self::ToolUse { cache_control, .. }
-            | Self::ToolResult { cache_control, .. } => *cache_control = Some(EPHEMERAL),
+            | Self::ToolResult { cache_control, .. }
+            | Self::Image { cache_control, .. } => *cache_control = Some(EPHEMERAL),
         }
     }
 }
@@ -786,6 +798,10 @@ impl<'a> From<&'a ContentBlock> for AnthropicBlock<'a> {
                 tool_use_id: call_id,
                 content: Text(content),
                 is_error: *is_error,
+                cache_control: None,
+            },
+            ContentBlock::Image { media_type, data } => Self::Image {
+                source: AnthropicImageSource::Base64 { media_type, data },
                 cache_control: None,
             },
         }

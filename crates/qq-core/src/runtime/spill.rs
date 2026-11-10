@@ -1,9 +1,10 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::json;
 
-use qq_provider::ToolSpec;
+use qq_provider::{ContentBlock, Message, ToolSpec, tool_image_markers};
 
 use crate::tools::output::{
     Bounds, Header, MARKER_RESERVE_BYTES, MAX_LINE_BYTES, escaped_len, push_line,
@@ -77,8 +78,80 @@ pub(crate) enum SpillRead {
 pub(crate) type SpillReadFuture =
     Pin<Box<dyn Future<Output = Result<SpillRead, String>> + Send + 'static>>;
 
+pub(crate) type ToolImageFuture<T> =
+    Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'static>>;
+
 pub(crate) trait SpillReader: Send + Sync {
     fn read(&self, handle: SpillHandle) -> SpillReadFuture;
+
+    /// Keep an image a tool returned, by content digest. Stores without
+    /// image support drop it, and the model keeps the text marker.
+    fn put_tool_image(&self, _sha256: String, _bytes: Vec<u8>) -> ToolImageFuture<()> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+
+    fn read_tool_image(&self, _sha256: String) -> ToolImageFuture<Option<Vec<u8>>> {
+        Box::pin(std::future::ready(Ok(None)))
+    }
+}
+
+const MAX_REQUEST_IMAGES: usize = 20;
+const MAX_REQUEST_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// A copy of `messages` with the newest stored tool images attached after
+/// their tool results. History is unchanged: older or unavailable images stay
+/// as their text markers, and a store failure only costs the pixels.
+pub(crate) async fn attach_recent_tool_images(
+    messages: &Arc<Vec<Message>>,
+    store: &dyn SpillReader,
+) -> Arc<Vec<Message>> {
+    let mut wanted = Vec::new();
+    'scan: for (index, message) in messages.iter().enumerate().rev() {
+        for block in message.content().iter().rev() {
+            let ContentBlock::ToolResult { content, .. } = block else {
+                continue;
+            };
+            for (media_type, sha256) in tool_image_markers(content).into_iter().rev() {
+                if wanted.len() == MAX_REQUEST_IMAGES {
+                    break 'scan;
+                }
+                wanted.push((index, media_type, sha256));
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Arc::clone(messages);
+    }
+    let mut attached: Vec<(usize, ContentBlock)> = Vec::new();
+    let mut total = 0_usize;
+    for (index, media_type, sha256) in wanted {
+        let Ok(Some(bytes)) = store.read_tool_image(sha256.to_owned()).await else {
+            continue;
+        };
+        total = total.saturating_add(bytes.len());
+        if total > MAX_REQUEST_IMAGE_BYTES {
+            break;
+        }
+        attached.push((
+            index,
+            ContentBlock::Image {
+                media_type: media_type.to_owned(),
+                data: base64::engine::general_purpose::STANDARD
+                    .encode(bytes)
+                    .into(),
+            },
+        ));
+    }
+    if attached.is_empty() {
+        return Arc::clone(messages);
+    }
+    let mut request = messages.as_ref().clone();
+    for (index, image) in attached.into_iter().rev() {
+        let mut blocks = request[index].content().to_vec();
+        blocks.push(image);
+        request[index] = Message::tool_results(blocks);
+    }
+    Arc::new(request)
 }
 
 pub(crate) fn read_tool_result_spec() -> ToolSpec {
@@ -246,6 +319,89 @@ pub(crate) fn render_tool_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::{collections::HashMap, sync::Mutex};
+
+    #[derive(Default)]
+    struct Images(Mutex<HashMap<String, Vec<u8>>>);
+
+    impl SpillReader for Images {
+        fn read(&self, _: SpillHandle) -> SpillReadFuture {
+            Box::pin(std::future::ready(Ok(SpillRead::Missing)))
+        }
+
+        fn read_tool_image(&self, sha256: String) -> ToolImageFuture<Option<Vec<u8>>> {
+            let found = self.0.lock().unwrap().get(&sha256).cloned();
+            Box::pin(std::future::ready(Ok(found)))
+        }
+    }
+
+    fn digest(index: usize) -> String {
+        format!("{index:064x}")
+    }
+
+    fn history(count: usize) -> Arc<Vec<Message>> {
+        Arc::new(
+            (0..count)
+                .map(|index| {
+                    Message::tool_results(vec![ContentBlock::ToolResult {
+                        call_id: format!("call_{index}"),
+                        content: qq_provider::tool_image_marker("image/png", &digest(index)),
+                        is_error: false,
+                    }])
+                })
+                .collect(),
+        )
+    }
+
+    fn stored(count: usize, bytes: usize) -> Images {
+        let images = Images::default();
+        for index in 0..count {
+            images
+                .0
+                .lock()
+                .unwrap()
+                .insert(digest(index), vec![1; bytes]);
+        }
+        images
+    }
+
+    fn with_pixels(messages: &[Message]) -> Vec<usize> {
+        (0..messages.len())
+            .filter(|index| {
+                messages[*index]
+                    .content()
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::Image { .. }))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn only_the_newest_images_are_attached_and_history_is_untouched() {
+        let messages = history(25);
+        let request = attach_recent_tool_images(&messages, &stored(25, 3)).await;
+        assert_eq!(with_pixels(&request), (5..25).collect::<Vec<_>>());
+        assert!(with_pixels(&messages).is_empty());
+        assert!(matches!(
+            request[0].content(),
+            [ContentBlock::ToolResult { content, .. }] if content.contains("sha256:")
+        ));
+    }
+
+    #[tokio::test]
+    async fn the_request_byte_cap_keeps_the_newest_images() {
+        let messages = history(4);
+        let request = attach_recent_tool_images(&messages, &stored(4, 2 * 1024 * 1024)).await;
+        assert_eq!(with_pixels(&request), [2, 3]);
+    }
+
+    #[tokio::test]
+    async fn images_missing_from_the_store_stay_as_text() {
+        let messages = history(2);
+        let request = attach_recent_tool_images(&messages, &Images::default()).await;
+        assert!(Arc::ptr_eq(&request, &messages));
+    }
 
     #[test]
     fn handles_parse_strictly() {
