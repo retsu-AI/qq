@@ -12,7 +12,7 @@ model=$2
 job=$3
 shift 3
 
-: "${LITELLM_BASE_URL:?set LITELLM_BASE_URL to the gateway's /v1 base URL}"
+: "${LITELLM_BASE_URL:?set LITELLM_BASE_URL to the gateway /v1 base URL}"
 : "${LITELLM_API_KEY:?set LITELLM_API_KEY}"
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
