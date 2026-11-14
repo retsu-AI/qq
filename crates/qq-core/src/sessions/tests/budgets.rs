@@ -90,7 +90,7 @@ async fn turn_budget_grants_one_final_response_then_settles_as_budget_exhausted(
 }
 
 #[tokio::test]
-async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
+async fn tool_call_budget_smaller_than_a_turn_still_runs_its_calls() {
     let mut harness = budget_harness(BudgetLoopLoader {
         requests: Arc::new(StdMutex::new(Vec::new())),
         entered: None,
@@ -102,17 +102,68 @@ async fn tool_call_budget_reserves_the_final_turn_before_the_cap() {
     let run_id = queue_limited_prompt(
         &harness,
         RunLimits {
-            max_tool_calls: Some(3 + crate::MAX_TOOL_CALLS_PER_TURN as u32),
+            max_tool_calls: Some(3),
             ..RunLimits::default()
         },
     )
     .await;
     let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
+    let succeeded = observed
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event,
+                SessionEvent::ToolCallFinished { ref tool_call } if !tool_call.is_error
+            )
+        })
+        .count();
+    assert_eq!(succeeded, 3);
     let exhaustion = exhaustion_of(&observed, run_id);
     assert_eq!(exhaustion.limit, BudgetLimitKind::ToolCalls);
     assert!(exhaustion.final_response);
     let requests = harness.requests.lock().unwrap();
-    assert_eq!(requests.len(), 5);
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests.last().unwrap().tool_choice(),
+        qq_provider::ToolChoice::None
+    );
+}
+
+#[tokio::test]
+async fn a_turn_requesting_more_calls_than_remain_runs_only_the_remaining_allowance() {
+    let requests = Arc::new(StdMutex::new(Vec::new()));
+    let mut harness = recording_harness(
+        Arc::new(BurstLoopLoader {
+            requests: Arc::clone(&requests),
+            calls_per_turn: 5,
+        }),
+        &requests,
+    )
+    .await;
+    let run_id = queue_limited_prompt(
+        &harness,
+        RunLimits {
+            max_tool_calls: Some(3),
+            ..RunLimits::default()
+        },
+    )
+    .await;
+    let observed = collect_until(&mut harness.events, finished_for(run_id)).await;
+    let finished = observed
+        .iter()
+        .filter_map(|event| match &event.event {
+            SessionEvent::ToolCallFinished { tool_call } => Some(tool_call.is_error),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.iter().filter(|is_error| !**is_error).count(), 3);
+    assert_eq!(finished.iter().filter(|is_error| **is_error).count(), 2);
+    let exhaustion = exhaustion_of(&observed, run_id);
+    assert_eq!(exhaustion.limit, BudgetLimitKind::ToolCalls);
+    assert!(exhaustion.final_response);
+    assert!(exhaustion.message.contains("after 3 calls"));
+    let requests = harness.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
     assert_eq!(
         requests.last().unwrap().tool_choice(),
         qq_provider::ToolChoice::None
@@ -483,13 +534,68 @@ impl Provider for BudgetLoopProvider {
 type BudgetHarness = SessionFixture;
 
 async fn budget_harness(loader: BudgetLoopLoader) -> BudgetHarness {
+    let requests = Arc::clone(&loader.requests);
+    recording_harness(Arc::new(loader), &requests).await
+}
+
+async fn recording_harness(
+    loader: Arc<dyn RuntimeLoader>,
+    requests: &Arc<StdMutex<Vec<ModelRequest>>>,
+) -> BudgetHarness {
     let directory = test_directory();
     std::fs::write(directory.path().join("note.txt"), "note").unwrap();
-    let requests = Arc::clone(&loader.requests);
     let options = SessionRuntimeOptions::new(directory.path().join("sessions.sqlite3"));
-    SessionFixture::open_in(directory, options, Arc::new(loader), ApprovalMode::Auto)
+    SessionFixture::open_in(directory, options, loader, ApprovalMode::Auto)
         .await
-        .recording(&requests)
+        .recording(requests)
+}
+
+struct BurstLoopLoader {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    calls_per_turn: usize,
+}
+
+impl RuntimeLoader for BurstLoopLoader {
+    fn load(&self, request: RuntimeLoadRequest) -> RuntimeLoadFuture {
+        let provider = BurstLoopProvider {
+            requests: Arc::clone(&self.requests),
+            calls_per_turn: self.calls_per_turn,
+            turn: AtomicUsize::new(0),
+        };
+        Box::pin(async move {
+            Runtime::new(provider, "test-model", 256)
+                .map(|runtime| loaded_runtime(runtime, &request.workspace, None))
+                .map_err(load_error)
+        })
+    }
+}
+
+struct BurstLoopProvider {
+    requests: Arc<StdMutex<Vec<ModelRequest>>>,
+    calls_per_turn: usize,
+    turn: AtomicUsize,
+}
+
+impl Provider for BurstLoopProvider {
+    fn stream(&self, request: ModelRequest) -> ProviderStream {
+        let has_tools = request.tool_choice() == qq_provider::ToolChoice::Auto;
+        self.requests.lock().unwrap().push(request);
+        let turn = self.turn.fetch_add(1, Ordering::SeqCst);
+        if !has_tools {
+            return provider_script([text_delta("final status"), completed(None)]);
+        }
+        provider_script(
+            (0..self.calls_per_turn)
+                .flat_map(|index| {
+                    tool_call(
+                        format!("call_{turn}_{index}"),
+                        "read_file",
+                        r#"{"path":"note.txt"}"#,
+                    )
+                })
+                .chain([completed(None)]),
+        )
+    }
 }
 
 async fn queue_limited_prompt(harness: &BudgetHarness, limits: RunLimits) -> RunId {

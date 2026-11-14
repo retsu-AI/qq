@@ -261,6 +261,7 @@ struct RunEnvironment {
 struct PreparedTurn {
     turn_ordinal: u32,
     budget_final_turn: bool,
+    tool_call_allowance: usize,
     final_answer_turn: bool,
     checkpoint_turn: bool,
     slice_report: bool,
@@ -948,6 +949,7 @@ impl RunState {
                                 yield TurnStep::Stop; return;
                             }
                         };
+                        let tool_call_allowance = run.budget.tool_call_allowance(MAX_TOOL_CALLS_PER_TURN);
                         let slice_checkpoint = !budget_final_turn
                             && slice.slice_tool_calls
                                 .saturating_add(MAX_TOOL_CALLS_PER_TURN)
@@ -1014,7 +1016,7 @@ impl RunState {
                             0
                         };
 
-        yield TurnStep::Ready(PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes });
+        yield TurnStep::Ready(PreparedTurn { turn_ordinal, budget_final_turn, tool_call_allowance, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes });
                 }
     }
     fn compact_turn(
@@ -1028,7 +1030,7 @@ impl RunState {
                     let model_max_output_tokens = *model_max_output_tokens;
                     let deadline = *deadline;
                     let turn_recovery = plan.runtime.turn_recovery;
-                    let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes } = prepared;
+                    let PreparedTurn { turn_ordinal, budget_final_turn, tool_call_allowance, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes } = prepared;
                         let estimate_input_tokens = |chain: Option<(u64, u64, u64, u64)>, reducible: u64, irreducible: u64| -> u64 {
                             let message_bytes = reducible.saturating_add(irreducible);
                             match chain {
@@ -1322,7 +1324,7 @@ impl RunState {
                             estimate_input_tokens(Some(chain), window.reducible_message_bytes, window.irreducible_message_bytes)
                         });
 
-        yield TurnStep::Ready(CompactedTurn { compatible_input_tokens, prepared: PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes }, message_bytes });
+        yield TurnStep::Ready(CompactedTurn { compatible_input_tokens, prepared: PreparedTurn { turn_ordinal, budget_final_turn, tool_call_allowance, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes }, message_bytes });
                 }
     }
     fn stream_turn(
@@ -1338,7 +1340,7 @@ impl RunState {
                     let reasoning_effort = plan.runtime.reasoning_effort;
 
         let CompactedTurn { prepared, message_bytes, compatible_input_tokens } = compacted;
-                    let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes } = prepared;
+                    let PreparedTurn { turn_ordinal, budget_final_turn, tool_call_allowance, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes } = prepared;
                         if turn_ordinal == 1 {
                             slice.pending_reserved_boundary_notices = slice.pending_boundary_notices.len();
                         }
@@ -1600,7 +1602,7 @@ impl RunState {
                                         });
                                         yield TurnStep::Stop; return;
                                     }
-                                    let over_cap = attempt.pending_calls.len() >= MAX_TOOL_CALLS_PER_TURN;
+                                    let over_cap = attempt.pending_calls.len() >= tool_call_allowance;
                                     let rejection = if summarizer.is_some() {
                                         Some(SUMMARIZER_TOOL_REJECTION.to_owned())
                                     } else if final_answer_turn {
@@ -1609,6 +1611,11 @@ impl RunState {
                                         Some(SLICE_CHECKPOINT_REJECTION.to_owned())
                                     } else if checkpoint_turn {
                                         Some(STALL_REPORT_REJECTION.to_owned())
+                                    } else if over_cap && tool_call_allowance < MAX_TOOL_CALLS_PER_TURN {
+                                        Some(format!(
+                                            "not executed: the run's tool call budget allowed only \
+                                             {tool_call_allowance} more tool calls"
+                                        ))
                                     } else if over_cap {
                                         Some(format!(
                                             "not executed: this turn requested more than \
@@ -1866,7 +1873,7 @@ impl RunState {
                             attempt.pending_calls.clear();
                         }
 
-        yield TurnStep::Ready(StreamedTurn { prepared: PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes }, message_bytes, attempt });
+        yield TurnStep::Ready(StreamedTurn { prepared: PreparedTurn { turn_ordinal, budget_final_turn, tool_call_allowance, final_answer_turn, checkpoint_turn, slice_report, request_system, request_has_tools, request_system_hash, system_bytes, tool_schema_bytes }, message_bytes, attempt });
                 }
     }
     fn settle_turn(
@@ -1884,7 +1891,7 @@ impl RunState {
                     let turn_recovery = plan.runtime.turn_recovery;
 
                     let StreamedTurn { prepared, message_bytes, attempt } = streamed;
-                    let PreparedTurn { turn_ordinal, budget_final_turn, final_answer_turn, checkpoint_turn, slice_report, request_system: _, request_has_tools: _, request_system_hash: _, system_bytes, tool_schema_bytes } = prepared;
+                    let PreparedTurn { turn_ordinal, budget_final_turn, tool_call_allowance, final_answer_turn, checkpoint_turn, slice_report, request_system: _, request_has_tools: _, request_system_hash: _, system_bytes, tool_schema_bytes } = prepared;
                     let AttemptScope { pending_calls, replay, blocks, terminal_usage, completed, interrupted_turn, truncated_turn, truncation_reason, streamed_visible_output, turn_fault, retry_after, .. } = attempt;
                         window.compatible_request = terminal_usage.map(|usage| {
                             (
@@ -1949,7 +1956,7 @@ impl RunState {
                             if rejection.is_none() {
                                 run.call_effects.insert(pending.provider_call_id.clone(), effect);
                             }
-                            if !checkpoint_turn && !final_answer_turn && summarizer.is_none() && index < MAX_TOOL_CALLS_PER_TURN {
+                            if !checkpoint_turn && !final_answer_turn && summarizer.is_none() && index < tool_call_allowance {
                                 run.guard_eligible.push((id, CallKey::new(&pending.name, &pending.arguments)));
                             }
                             calls.push(RuntimeToolCall {
