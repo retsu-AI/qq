@@ -117,6 +117,13 @@ impl BudgetMeter {
             .saturating_add(u32::try_from(count).unwrap_or(u32::MAX));
     }
 
+    pub(crate) fn tool_call_allowance(&self, requested: usize) -> usize {
+        self.limits.max_tool_calls.map_or(requested, |limit| {
+            requested
+                .min(usize::try_from(limit.saturating_sub(self.tool_calls)).unwrap_or(usize::MAX))
+        })
+    }
+
     pub(crate) fn charge_child(&mut self, usage: Option<TokenUsage>, cost_usd_nanos: Option<u64>) {
         self.cost_usd_nanos = match (self.cost_usd_nanos, cost_usd_nanos) {
             (Some(total), Some(cost)) => total.checked_add(cost),
@@ -277,7 +284,7 @@ impl BudgetMeter {
             .is_some_and(|limit| self.turns.saturating_add(1) >= limit);
         let tools_spent = limits.max_tool_calls.is_some_and(|limit| {
             self.tool_calls
-                .saturating_add(u32::try_from(next_turn_tools).unwrap_or(u32::MAX))
+                .saturating_add(u32::from(next_turn_tools > 0))
                 > limit
         });
         let kind = if turns_spent {
@@ -469,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_budget_reserves_room_for_the_next_turn() {
+    fn tool_call_budget_caps_the_turn_at_the_remaining_allowance() {
         let now = Instant::now();
         let limits = RunLimits {
             max_tool_calls: Some(20),
@@ -477,10 +484,22 @@ mod tests {
         };
         let mut meter = BudgetMeter::new(limits, None, now);
         meter.charge_tool_calls(10);
-        assert_eq!(meter.before_turn(now, 10), BudgetDecision::Continue);
+        assert_eq!(meter.before_turn(now, 16), BudgetDecision::Continue);
+        assert_eq!(meter.tool_call_allowance(16), 10);
+        assert_eq!(meter.tool_call_allowance(4), 4);
+        meter.charge_tool_calls(9);
+        assert_eq!(meter.before_turn(now, 16), BudgetDecision::Continue);
+        assert_eq!(meter.tool_call_allowance(16), 1);
+        meter.charge_tool_calls(1);
+        assert_eq!(meter.tool_call_allowance(16), 0);
+        assert_eq!(meter.before_turn(now, 0), BudgetDecision::Continue);
         assert_eq!(
-            meter.before_turn(now, 11),
+            meter.before_turn(now, 16),
             BudgetDecision::FinalResponse(BudgetLimitKind::ToolCalls)
+        );
+        assert_eq!(
+            BudgetMeter::new(RunLimits::default(), None, now).tool_call_allowance(16),
+            16
         );
     }
 
