@@ -687,6 +687,7 @@ fn openai_error_kind(code: Option<&str>, message: Option<&str>) -> ProviderError
         Some("rate_limit_exceeded" | "insufficient_quota" | "slow_down") => {
             ProviderErrorKind::RateLimited
         }
+        Some("context_length_exceeded") => ProviderErrorKind::ContextExceeded,
         Some("invalid_request_error" | "invalid_prompt") => ProviderErrorKind::InvalidRequest,
         Some(
             "server_error" | "service_unavailable" | "server_is_overloaded" | "overloaded_error",
